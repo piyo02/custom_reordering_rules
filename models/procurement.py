@@ -66,33 +66,64 @@ class ProcurementOrder(models.Model):
                         product_context['to_date'] = group['to_date'].strftime(DEFAULT_SERVER_DATETIME_FORMAT)
                     product_quantity = location_data['products'].with_context(product_context)._product_available()
                     for orderpoint in location_orderpoints:
-                        _logger.warning( orderpoint.location_ids )
+                        product_quantity_in_location = 0
+                        for location in orderpoint.location_ids:
+                            stocks = self.env['stock.quant'].search([
+                                        ('product_id.id', '=', orderpoint.product_id.id),
+                                        ('location_id.location_id.id', '=', location.location_id.id)
+                                    ])
+                            for stock in stocks:
+                                product_quantity_in_location += stock.qty
+                        
+                        purchases_waiting = self.env['purchase.order.line'].search([
+                            ('product_id.id', '=', orderpoint.product_id.id),
+                            ('order_id.state', '=', 'draft')
+                        ])
+                        for purchase in purchases_waiting:
+                            product_quantity_in_location += purchase.product_qty
+
+                        route_id = orderpoint.product_id.route_ids.id
                         try:
+                            is_finish = False
+                            if product_quantity_in_location < orderpoint.product_min_qty and route_id == 6:
+                                qty = orderpoint.product_min_qty - product_quantity_in_location
+                                is_finish = True
+                                new_procurement = ProcurementAutorundefer.create(
+                                    orderpoint._prepare_procurement_values(qty, **group['procurement_values']))
+                                procurement_list.append(new_procurement)
+                                new_procurement.message_post_with_view('mail.message_origin_link',
+                                    values={'self': new_procurement, 'origin': orderpoint},
+                                    subtype_id=self.env.ref('mail.mt_note').id)
+                                self._procurement_from_orderpoint_post_process([orderpoint.id])
+                        
                             op_product_virtual = product_quantity[orderpoint.product_id.id]['virtual_available']
-                            if op_product_virtual is None:
+                            if op_product_virtual is None or is_finish:
+                            # if op_product_virtual is None:
                                 continue
-                            if float_compare(op_product_virtual, orderpoint.product_min_qty, precision_rounding=orderpoint.product_uom.rounding) <= 0:
-                                qty = max(orderpoint.product_min_qty, orderpoint.product_max_qty) - op_product_virtual
-                                remainder = orderpoint.qty_multiple > 0 and qty % orderpoint.qty_multiple or 0.0
+                            # if float_compare(op_product_virtual, orderpoint.product_min_qty, precision_rounding=orderpoint.product_uom.rounding) <= 0:
+                            #     qty = max(orderpoint.product_min_qty, orderpoint.product_max_qty) - op_product_virtual
+                            #     remainder = orderpoint.qty_multiple > 0 and qty % orderpoint.qty_multiple or 0.0
 
-                                if float_compare(remainder, 0.0, precision_rounding=orderpoint.product_uom.rounding) > 0:
-                                    qty += orderpoint.qty_multiple - remainder
+                            #     if float_compare(remainder, 0.0, precision_rounding=orderpoint.product_uom.rounding) > 0:
+                            #         qty += orderpoint.qty_multiple - remainder
 
-                                if float_compare(qty, 0.0, precision_rounding=orderpoint.product_uom.rounding) < 0:
-                                    continue
+                            #     if float_compare(qty, 0.0, precision_rounding=orderpoint.product_uom.rounding) < 0:
+                            #         continue
 
-                                qty -= substract_quantity[orderpoint.id]
-                                qty_rounded = float_round(qty, precision_rounding=orderpoint.product_uom.rounding)
-                                if qty_rounded > 0:
-                                    new_procurement = ProcurementAutorundefer.create(
-                                        orderpoint._prepare_procurement_values(qty_rounded, **group['procurement_values']))
-                                    procurement_list.append(new_procurement)
-                                    new_procurement.message_post_with_view('mail.message_origin_link',
-                                        values={'self': new_procurement, 'origin': orderpoint},
-                                        subtype_id=self.env.ref('mail.mt_note').id)
-                                    self._procurement_from_orderpoint_post_process([orderpoint.id])
-                                if use_new_cursor:
-                                    cr.commit()
+                            #     qty -= substract_quantity[orderpoint.id]
+                            #     qty_rounded = float_round(qty, precision_rounding=orderpoint.product_uom.rounding)
+
+                                # if qty_rounded > 0:
+                                # if product_quantity_in_location < orderpoint.product_min_qty:
+                                    # new_procurement = ProcurementAutorundefer.create(
+                                    #     orderpoint._prepare_procurement_values(qty_rounded, **group['procurement_values']))
+                                    # procurement_list.append(new_procurement)
+                                    # new_procurement.message_post_with_view('mail.message_origin_link',
+                                    #     values={'self': new_procurement, 'origin': orderpoint},
+                                    #     subtype_id=self.env.ref('mail.mt_note').id)
+                                    # self._procurement_from_orderpoint_post_process([orderpoint.id])
+                                # if use_new_cursor:
+                                #     cr.commit()
 
                         except OperationalError:
                             if use_new_cursor:
